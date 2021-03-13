@@ -56,7 +56,9 @@ R.C. Eberhart in Particle Swarm Optimization [IJCNN1995]_.
 """
 
 # Import standard library
+import json
 import logging
+import os
 
 # Import modules
 import numpy as np
@@ -67,8 +69,18 @@ from collections import deque
 from ..backend.operators import compute_pbest, compute_objective_function
 from ..backend.topology import Star
 from ..backend.handlers import BoundaryHandler, VelocityHandler, OptionsHandler
+from ..backend.swarms import Swarm
+
+
 from ..base import SwarmOptimizer
 from ..utils.reporter import Reporter
+
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
 
 
 class GlobalBestPSO(SwarmOptimizer):
@@ -86,6 +98,8 @@ class GlobalBestPSO(SwarmOptimizer):
         ftol=-np.inf,
         ftol_iter=1,
         init_pos=None,
+        checkpoint_interval=20,
+        checkpoint="__checkpoint__.json",
     ):
         """Initialize the swarm
 
@@ -131,30 +145,131 @@ class GlobalBestPSO(SwarmOptimizer):
             option to explicitly set the particles' initial positions. Set to
             :code:`None` if you wish to generate the particles randomly.
         """
+        if os.path.isfile(checkpoint):
+            self.checkpoint_interval = checkpoint_interval
+            self._from_checkpoint(checkpoint=checkpoint)
+        else:
+            super(GlobalBestPSO, self).__init__(
+                n_particles=n_particles,
+                dimensions=dimensions,
+                options=options,
+                bounds=bounds,
+                velocity_clamp=velocity_clamp,
+                center=center,
+                ftol=ftol,
+                ftol_iter=ftol_iter,
+                init_pos=init_pos,
+            )
+
+            if oh_strategy is None:
+                oh_strategy = {}
+            # Initialize logger
+            self.rep = Reporter(logger=logging.getLogger(__name__))
+            # Initialize the resettable attributes
+            self.reset()
+            # Initialize the topology
+            self.top = Star()
+            self.bh = BoundaryHandler(strategy=bh_strategy)
+            self.vh = VelocityHandler(strategy=vh_strategy)
+            self.oh = OptionsHandler(strategy=oh_strategy)
+            self.name = __name__
+            self.checkpoint_interval = checkpoint_interval
+            self.starting_iter = 0
+            self.restore = False
+            self.checkpoint_file = None
+
+        self.rep.log(f"Setting checkpoint interval to {self.checkpoint_interval}",lvl=logging.INFO)
+
+    def checkpoint(self, current_iteration):
+        """Checkpoint the state to a JSON file.
+        """
+        optimizer = {}
+        # First, store all the things one would pass to the constructor
+        optimizer.update(n_particles=self.n_particles)
+        optimizer.update(dimensions=self.dimensions)
+        optimizer.update(options=self.options)
+        optimizer.update(bh_strategy=self.bh.strategy)
+        optimizer.update(vh_strategy=self.vh.strategy)
+        optimizer.update(oh_strategy=self.oh.strategy)
+        optimizer.update(bounds=self.bounds)
+        optimizer.update(velocity_clamp=self.velocity_clamp)
+        optimizer.update(ftol=self.ftol)
+        optimizer.update(ftol_iter=self.ftol_iter)
+        optimizer.update(center=self.center)
+        # Some information on the current iteration
+        optimizer.update(current_iteration=current_iteration)
+
+        # Now store current properties of the swarm
+        optimizer.update(position=self.swarm.position)
+        optimizer.update(velocity=self.swarm.velocity)
+        optimizer.update(current_cost=self.swarm.current_cost)
+        optimizer.update(pbest_pos=self.swarm.pbest_pos)
+        optimizer.update(pbest_cost=self.swarm.pbest_cost)
+        optimizer.update(best_pos=self.swarm.best_pos)
+        optimizer.update(best_cost=self.swarm.best_cost)
+        # The swarm options
+        optimizer.update(swarm_options=self.swarm.options)
+        # Store the histories so they can be repopulated
+        optimizer.update(cost_history=self.cost_history)
+        optimizer.update(mean_pbest_history=self.mean_pbest_history)
+        optimizer.update(mean_neighbor_history=self.mean_neighbor_history)
+        optimizer.update(pos_history=self.pos_history)
+        optimizer.update(velocity_history=self.velocity_history)
+        with open("__checkpoint__.json", "w") as fw:
+            json.dump(
+                optimizer, fw, cls=NumpyEncoder, indent=4, sort_keys=True
+            )
+
+    def _from_checkpoint(self, checkpoint="__checkpoint__.json"):
+        """Initialize the optimizer and swarm from checkpoint saved to disk
+
+        Args:
+            checkpoint (str): The checkpoint file
+        """
+        # Read the checkpoint file
+        with open(checkpoint) as fp:
+            optimizer = json.load(fp)
+        # Call the parent constructor
+        # Note that this will create a new swarm
+
         super(GlobalBestPSO, self).__init__(
-            n_particles=n_particles,
-            dimensions=dimensions,
-            options=options,
-            bounds=bounds,
-            velocity_clamp=velocity_clamp,
-            center=center,
-            ftol=ftol,
-            ftol_iter=ftol_iter,
-            init_pos=init_pos,
+            n_particles=optimizer["n_particles"],
+            dimensions=optimizer["dimensions"],
+            options=optimizer["options"],
+            bounds=optimizer["bounds"],
+            velocity_clamp=optimizer["velocity_clamp"],
+            center=optimizer["center"],
+            ftol=optimizer["ftol"],
+            ftol_iter=optimizer["ftol_iter"],
         )
 
-        if oh_strategy is None:
-            oh_strategy = {}
+        # Restore the swarm
+        self.swarm = Swarm(
+            position=np.array(optimizer["position"]),
+            velocity=np.array(optimizer["velocity"]),
+            pbest_pos=np.array(optimizer["pbest_pos"]),
+            pbest_cost=np.array(optimizer["pbest_cost"]),
+            options=optimizer["swarm_options"],
+            best_pos=np.array(optimizer["best_pos"]),
+            best_cost=np.float64(optimizer["best_cost"]),
+            current_cost=np.array(optimizer["current_cost"]),
+        )
+
+        # Restore various strategies
+        self.bh = BoundaryHandler(strategy=optimizer["bh_strategy"])
+        self.vh = VelocityHandler(strategy=optimizer["vh_strategy"])
+        self.oh = OptionsHandler(strategy=optimizer["oh_strategy"])
+
+        # Re-initialize the histories
         # Initialize logger
         self.rep = Reporter(logger=logging.getLogger(__name__))
-        # Initialize the resettable attributes
-        self.reset()
         # Initialize the topology
         self.top = Star()
-        self.bh = BoundaryHandler(strategy=bh_strategy)
-        self.vh = VelocityHandler(strategy=vh_strategy)
-        self.oh = OptionsHandler(strategy=oh_strategy)
         self.name = __name__
+        self.starting_iter = optimizer["current_iteration"]+1
+        self.restore = True
+        self.checkpoint_file = checkpoint
+       
 
     def optimize(
         self, objective_func, iters, n_processes=None, verbose=True, **kwargs
@@ -191,7 +306,7 @@ class GlobalBestPSO(SwarmOptimizer):
 
         self.rep.log("Obj. func. args: {}".format(kwargs), lvl=logging.DEBUG)
         self.rep.log(
-            "Optimize for {} iters with {}".format(iters, self.options),
+            "Optimize for {} total iters with {}".format(iters, self.options),
             lvl=log_level,
         )
         # Populate memory of the handlers
@@ -200,10 +315,13 @@ class GlobalBestPSO(SwarmOptimizer):
 
         # Setup Pool of processes for parallel evaluation
         pool = None if n_processes is None else mp.Pool(n_processes)
-
-        self.swarm.pbest_cost = np.full(self.swarm_size[0], np.inf)
+        remaining_iters = iters - self.starting_iter
+        if not self.restore:
+            self.swarm.pbest_cost = np.full(self.swarm_size[0], np.inf)
+        else:
+            self.rep.log(f"Resuming from iteration {self.starting_iter}, {remaining_iters} left", lvl=log_level)
         ftol_history = deque(maxlen=self.ftol_iter)
-        for i in self.rep.pbar(iters, self.name) if verbose else range(iters):
+        for i in self.rep.pbar(remaining_iters, self.name) if verbose else range(remaining_iters):
             # Compute cost for current position and personal best
             # fmt: off
             self.swarm.current_cost = compute_objective_function(self.swarm, objective_func, pool=pool, **kwargs)
@@ -237,7 +355,7 @@ class GlobalBestPSO(SwarmOptimizer):
                     break
             # Perform options update
             self.swarm.options = self.oh(
-                self.options, iternow=i, itermax=iters
+                self.options, iternow=i+self.starting_iter, itermax=iters
             )
             # Perform velocity and position updates
             self.swarm.velocity = self.top.compute_velocity(
@@ -246,7 +364,14 @@ class GlobalBestPSO(SwarmOptimizer):
             self.swarm.position = self.top.compute_position(
                 self.swarm, self.bounds, self.bh
             )
+            # If checkpointing is requested, pack up all the info needed
+            # to restore to a json file
+            if self.checkpoint_interval is not None:
+                if (i+1) % self.checkpoint_interval == 0:
+                    self.rep.log(f"Checkpointing at iteration {i+self.starting_iter}",lvl=log_level)
+                    self.checkpoint(i+self.starting_iter)
         # Obtain the final best_cost and the final best_position
+        
         final_best_cost = self.swarm.best_cost.copy()
         final_best_pos = self.swarm.pbest_pos[
             self.swarm.pbest_cost.argmin()
@@ -261,4 +386,8 @@ class GlobalBestPSO(SwarmOptimizer):
         # Close Pool of Processes
         if n_processes is not None:
             pool.close()
+
+        if self.restore:
+            if os.path.isfile(self.checkpoint_file):
+                os.remove(self.checkpoint_file)
         return (final_best_cost, final_best_pos)
