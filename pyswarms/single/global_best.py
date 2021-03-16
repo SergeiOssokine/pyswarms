@@ -58,20 +58,17 @@ R.C. Eberhart in Particle Swarm Optimization [IJCNN1995]_.
 # Import standard library
 import json
 import logging
+import multiprocessing as mp
 import os
+from collections import deque
 
 # Import modules
 import numpy as np
-import multiprocessing as mp
 
-from collections import deque
-
-from ..backend.operators import compute_pbest, compute_objective_function
-from ..backend.topology import Star
-from ..backend.handlers import BoundaryHandler, VelocityHandler, OptionsHandler
+from ..backend.handlers import BoundaryHandler, OptionsHandler, VelocityHandler
+from ..backend.operators import compute_objective_function, compute_pbest
 from ..backend.swarms import Swarm
-
-
+from ..backend.topology import Star
 from ..base import SwarmOptimizer
 from ..utils.reporter import Reporter
 
@@ -98,7 +95,7 @@ class GlobalBestPSO(SwarmOptimizer):
         ftol=-np.inf,
         ftol_iter=1,
         init_pos=None,
-        checkpoint_interval=20,
+        checkpoint_interval=5,
         checkpoint="__checkpoint__.json",
     ):
         """Initialize the swarm
@@ -176,9 +173,12 @@ class GlobalBestPSO(SwarmOptimizer):
             self.checkpoint_interval = checkpoint_interval
             self.starting_iter = 0
             self.restore = False
-            self.checkpoint_file = None
+            self.checkpoint_file = checkpoint
 
-        self.rep.log(f"Setting checkpoint interval to {self.checkpoint_interval}",lvl=logging.INFO)
+        self.rep.log(
+            f"Setting checkpoint interval to {self.checkpoint_interval}",
+            lvl=logging.INFO,
+        )
 
     def checkpoint(self, current_iteration):
         """Checkpoint the state to a JSON file.
@@ -215,7 +215,8 @@ class GlobalBestPSO(SwarmOptimizer):
         optimizer.update(mean_neighbor_history=self.mean_neighbor_history)
         optimizer.update(pos_history=self.pos_history)
         optimizer.update(velocity_history=self.velocity_history)
-        with open("__checkpoint__.json", "w") as fw:
+
+        with open(self.checkpoint_file, "w") as fw:
             json.dump(
                 optimizer, fw, cls=NumpyEncoder, indent=4, sort_keys=True
             )
@@ -266,10 +267,9 @@ class GlobalBestPSO(SwarmOptimizer):
         # Initialize the topology
         self.top = Star()
         self.name = __name__
-        self.starting_iter = optimizer["current_iteration"]+1
+        self.starting_iter = optimizer["current_iteration"] + 1
         self.restore = True
         self.checkpoint_file = checkpoint
-       
 
     def optimize(
         self, objective_func, iters, n_processes=None, verbose=True, **kwargs
@@ -319,9 +319,16 @@ class GlobalBestPSO(SwarmOptimizer):
         if not self.restore:
             self.swarm.pbest_cost = np.full(self.swarm_size[0], np.inf)
         else:
-            self.rep.log(f"Resuming from iteration {self.starting_iter}, {remaining_iters} left", lvl=log_level)
+            self.rep.log(
+                f"Resuming from iteration {self.starting_iter}, {remaining_iters} left",
+                lvl=log_level,
+            )
         ftol_history = deque(maxlen=self.ftol_iter)
-        for i in self.rep.pbar(remaining_iters, self.name) if verbose else range(remaining_iters):
+        for i in (
+            self.rep.pbar(remaining_iters, self.name)
+            if verbose
+            else range(remaining_iters)
+        ):
             # Compute cost for current position and personal best
             # fmt: off
             self.swarm.current_cost = compute_objective_function(self.swarm, objective_func, pool=pool, **kwargs)
@@ -355,7 +362,7 @@ class GlobalBestPSO(SwarmOptimizer):
                     break
             # Perform options update
             self.swarm.options = self.oh(
-                self.options, iternow=i+self.starting_iter, itermax=iters
+                self.options, iternow=i + self.starting_iter, itermax=iters
             )
             # Perform velocity and position updates
             self.swarm.velocity = self.top.compute_velocity(
@@ -367,11 +374,14 @@ class GlobalBestPSO(SwarmOptimizer):
             # If checkpointing is requested, pack up all the info needed
             # to restore to a json file
             if self.checkpoint_interval is not None:
-                if (i+1) % self.checkpoint_interval == 0:
-                    self.rep.log(f"Checkpointing at iteration {i+self.starting_iter}",lvl=log_level)
-                    self.checkpoint(i+self.starting_iter)
+                if (i + 1) % self.checkpoint_interval == 0:
+                    self.rep.log(
+                        f"Checkpointing at iteration {i+self.starting_iter}",
+                        lvl=log_level,
+                    )
+                    self.checkpoint(i + self.starting_iter)
         # Obtain the final best_cost and the final best_position
-        
+
         final_best_cost = self.swarm.best_cost.copy()
         final_best_pos = self.swarm.pbest_pos[
             self.swarm.pbest_cost.argmin()
@@ -387,7 +397,6 @@ class GlobalBestPSO(SwarmOptimizer):
         if n_processes is not None:
             pool.close()
 
-        if self.restore:
-            if os.path.isfile(self.checkpoint_file):
-                os.remove(self.checkpoint_file)
+        if os.path.isfile(self.checkpoint_file):
+            os.remove(self.checkpoint_file)
         return (final_best_cost, final_best_pos)
